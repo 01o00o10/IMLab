@@ -1,0 +1,812 @@
+/**
+ * 协议教学场景数据：描述步骤，不执行 TCP、TLS、MQTT 等真实网络协议。
+ * 页面播放器在 protocols.js 中读取这些数据；数据与 DOM 操作分开，便于学习。
+ * 每个协议包含：基本介绍、actors 参与方、source 官方规范、variants 可选场景。
+ */
+(() => {
+    /**
+     * 构造一步教学场景；from/to 是 actors 数组下标，相同时表示端点内部操作。
+     * raw 是展示用的原始报文，note 是解释，state 是各参与方在这一步之后的状态。
+     * raw 字符串中的 \n 表示报文换行，不是要额外发送的反斜杠字符。
+     * fields 是可选的 [字段名, 说明] 数组，未提供时使用空数组。
+     */
+    function createStep(from, to, title, raw, note, state, fields = []) {
+        return { from, to, title, raw, note, state, fields };
+    }
+
+    const scenes = {
+        // TCP：用字节序号解释握手和读取边界；这里的请求不是浏览器原始 Socket。
+        tcp: {
+            name: 'TCP',
+            layer: '传输',
+            title: '一条可靠的字节流，如何建立？',
+            description:
+                '观察三次握手、字节序号与应用消息边界。浏览器不能直接建立原始 TCP Socket；此处是协议教学模拟。',
+            actors: ['客户端', '服务端'],
+            source: ['TCP · RFC 9293', 'https://www.rfc-editor.org/rfc/rfc9293.html'],
+            variants: {
+                handshake: {
+                    name: '三次握手',
+                    steps: [
+                        createStep(
+                            0,
+                            1,
+                            'SYN：请求连接',
+                            'SYN=1  seq=100',
+                            '客户端选择初始序列号。SYN 本身占用一个序号。',
+                            ['SYN-SENT', 'LISTEN'],
+                            [
+                                ['seq', '当前报文的序列号'],
+                                ['SYN', '请求同步序列号'],
+                            ],
+                        ),
+                        createStep(
+                            1,
+                            0,
+                            'SYN + ACK：接受连接',
+                            'SYN=1 ACK=1  seq=300  ack=101',
+                            '服务端确认客户端 SYN，同时公布自己的初始序列号。',
+                            ['SYN-SENT', 'SYN-RECEIVED'],
+                            [['ack', '期待客户端下一个字节的序号，不是业务已读']],
+                        ),
+                        createStep(
+                            0,
+                            1,
+                            'ACK：连接建立',
+                            'ACK=1  seq=101  ack=301',
+                            '客户端确认服务端 SYN，双方可以双向传输数据。',
+                            ['ESTABLISHED', 'ESTABLISHED'],
+                        ),
+                        createStep(
+                            0,
+                            1,
+                            '发送 5 字节',
+                            'ACK=1  seq=101  ack=301\npayload (UTF-8): hello  [5 bytes]',
+                            '序号按字节推进，不按聊天消息条数推进。',
+                            ['ESTABLISHED', '收到 5 字节'],
+                        ),
+                        createStep(
+                            1,
+                            0,
+                            'TCP 确认',
+                            'ACK=1  seq=301  ack=106',
+                            'ack=106 表示已收到 101–105 的字节；不能证明业务处理或用户已读。',
+                            ['字节已确认', 'ESTABLISHED'],
+                        ),
+                    ],
+                },
+                framing: {
+                    name: '拆包与粘包',
+                    steps: [
+                        createStep(
+                            0,
+                            1,
+                            '应用构造两条消息',
+                            '[00 00 00 02][48 69] [00 00 00 03][42 6f 62]',
+                            '示例自定义格式：4 字节大端长度 + UTF-8 内容。Hi=2 字节，Bob=3 字节。',
+                            ['2 条应用消息', '缓冲区为空'],
+                        ),
+                        createStep(
+                            0,
+                            1,
+                            '第 1 次读取：只有部分内容',
+                            'read #1: 00 00 00 02 48',
+                            '读取到长度 2，却只有 1 字节内容。应缓冲等待，不能当作完整消息。',
+                            ['继续发送', '缓冲 5 字节'],
+                        ),
+                        createStep(
+                            0,
+                            1,
+                            '第 2 次读取：跨越消息边界',
+                            'read #2: 69 00 00 00 03 42 6f 62',
+                            '本次读取包含第一条尾部和完整第二条；读取边界不等于消息边界。',
+                            ['发送完成', '缓冲 13 字节'],
+                        ),
+                        createStep(
+                            1,
+                            1,
+                            '按长度解码两条消息',
+                            'decode → "Hi"\ndecode → "Bob"\nremaining → 0 bytes',
+                            '长度前缀让应用从连续字节流恢复消息边界。这是应用解码过程，没有额外网络报文。',
+                            ['发送完成', '解码 2 条消息'],
+                        ),
+                    ],
+                },
+            },
+        },
+        // TLS：完整握手的简化顺序，帮助区分加密通道与 WebSocket masking。
+        tls: {
+            name: 'TLS / WSS',
+            layer: '安全',
+            title: '聊天内容，如何经过加密通道？',
+            description:
+                '简化展示 TLS 1.3 完整握手及 WSS 层次；证书验证、密钥推导由真实 TLS 实现完成。当前本地 Java 服务使用 HTTP / WS，此处未建立 TLS 连接。',
+            actors: ['客户端', '服务端'],
+            source: ['TLS 1.3 · RFC 8446', 'https://www.rfc-editor.org/rfc/rfc8446.html'],
+            variants: {
+                normal: {
+                    name: 'TLS 1.3 完整握手',
+                    steps: [
+                        createStep(
+                            0,
+                            1,
+                            'ClientHello',
+                            'ClientHello\n supported_versions: TLS 1.3\n key_share: 客户端临时公钥\n server_name: im.example.com',
+                            '协商参数并提供密钥交换材料；私钥不会发送给对方。',
+                            ['等待服务端', '等待协商'],
+                        ),
+                        createStep(
+                            1,
+                            0,
+                            'ServerHello',
+                            'ServerHello\n selected_version: TLS 1.3\n key_share: 服务端临时公钥',
+                            '双方用密钥交换结果推导握手密钥，后续握手消息开始加密。',
+                            ['推导握手密钥', '推导握手密钥'],
+                        ),
+                        createStep(
+                            1,
+                            0,
+                            '服务端证明身份',
+                            '[Encrypted]\nEncryptedExtensions\nCertificate\nCertificateVerify\nFinished',
+                            '客户端验证证书链、主机名、签名和 Finished；本例省略可选客户端认证。',
+                            ['验证证书和签名', '等待 Finished'],
+                        ),
+                        createStep(
+                            0,
+                            1,
+                            '客户端 Finished',
+                            '[Encrypted]\nFinished',
+                            '确认握手完整性，然后使用应用流量密钥保护业务数据。',
+                            ['安全通道已建立', '安全通道已建立'],
+                        ),
+                        createStep(
+                            0,
+                            1,
+                            'WSS：加密通道中的 WebSocket',
+                            'TCP → TLS → HTTP Upgrade → WebSocket\n应用明文: {"type":"CHAT"}\n网络上: TLS Application Data（密文）',
+                            'WSS 在 TLS 之上运行 WebSocket。帧 masking 不等于加密；TLS 才保护内容。',
+                            ['WSS 应用消息', '解密后处理消息'],
+                        ),
+                    ],
+                },
+            },
+        },
+        // HTTP：介绍信息供真实 HTTP 页面使用，不经过模拟步骤播放器。
+        http: {
+            name: 'HTTP / HTTPS',
+            layer: '接口',
+            title: '长连接之外，请求与响应仍然重要。',
+            description:
+                '登录接口、联系人、历史消息、文件上传常使用 HTTP。这里通过 Java 的 /api/lab/echo 发出真实请求，展示请求体、响应状态、可读取响应头和耗时；不模拟登录或历史数据。',
+            actors: ['浏览器', 'Java API'],
+            source: ['HTTP 语义 · RFC 9110', 'https://www.rfc-editor.org/rfc/rfc9110.html'],
+            variants: {},
+        },
+        // XMPP：已认证会话中的三类 stanza：presence、message、IQ。
+        xmpp: {
+            name: 'XMPP',
+            layer: '消息标准',
+            title: '用 XML 描述消息、在线状态和查询。',
+            description:
+                '展示已完成认证和资源绑定后的 XMPP stanza。这里是教学模拟，没有连接 XMPP 服务器；SASL、TLS、XML stream 建立不包含在此场景。',
+            actors: ['Alice', 'XMPP 服务端', 'Bob'],
+            source: ['XMPP IM · RFC 6121', 'https://www.rfc-editor.org/rfc/rfc6121.html'],
+            variants: {
+                normal: {
+                    name: '在线状态与聊天',
+                    steps: [
+                        createStep(
+                            0,
+                            1,
+                            '发布在线状态',
+                            '<presence from="alice@example.com/web">\n  <show>chat</show>\n  <status>可以聊天</status>\n</presence>',
+                            'presence 表示可用状态，show=chat 表示愿意聊天；不是发送一条普通聊天文本。',
+                            ['在线 / 可聊天', '更新在线状态', '在线'],
+                            [
+                                ['from', 'JID：本地部分@域名/资源'],
+                                ['show', 'chat 表示愿意聊天'],
+                            ],
+                        ),
+                        createStep(
+                            0,
+                            1,
+                            '发送 message stanza',
+                            '<message from="alice@example.com/web"\n to="bob@example.com" type="chat" id="xmpp-1">\n  <body>你好 Bob</body>\n</message>',
+                            'message 传递聊天内容，服务端根据 JID 路由到接收方。',
+                            ['消息已发送', '正在路由', '等待消息'],
+                            [
+                                ['to', '接收者 JID'],
+                                ['body', '聊天正文'],
+                                ['id', 'stanza 标识，不自动提供可靠投递保证'],
+                            ],
+                        ),
+                        createStep(
+                            1,
+                            2,
+                            '服务端转发',
+                            '<message from="alice@example.com/web"\n to="bob@example.com/mobile" type="chat" id="xmpp-1">\n  <body>你好 Bob</body>\n</message>',
+                            '示例将消息路由到 Bob 的 mobile 资源；实际资源选择策略由服务端决定。',
+                            ['等待回复', '投递到 mobile', '收到聊天'],
+                        ),
+                        createStep(
+                            0,
+                            1,
+                            'IQ 请求：查询 roster',
+                            '<iq type="get" id="roster-1">\n  <query xmlns="jabber:iq:roster"/>\n</iq>',
+                            'IQ 是请求/响应式 stanza，适合查询或修改结构化数据。',
+                            ['查询联系人', '处理 IQ', '收到聊天'],
+                        ),
+                        createStep(
+                            1,
+                            0,
+                            'IQ result',
+                            '<iq type="result" id="roster-1">\n  <query xmlns="jabber:iq:roster">\n    <item jid="bob@example.com" subscription="both"/>\n  </query>\n</iq>',
+                            '响应沿用请求 id。subscription=both 表示双方订阅彼此的在线状态。',
+                            ['联系人已返回', '查询完成', '收到聊天'],
+                        ),
+                    ],
+                },
+            },
+        },
+        // MQTT：分别观察 QoS 0、QoS 1 重传和 QoS 2 本段交付。
+        mqtt: {
+            name: 'MQTT',
+            layer: '消息标准',
+            title: '发布到主题，让订阅者接收。',
+            description:
+                'MQTT 5 教学模拟：观察 Broker、主题、QoS 和确认。下方报文是字段解码视图；MQTT 网络编码是二进制，不是 JSON。',
+            actors: ['Alice 发布者', 'Broker', 'Bob 订阅者'],
+            source: ['MQTT 5 · OASIS', 'https://docs.oasis-open.org/mqtt/mqtt/v5.0/mqtt-v5.0.html'],
+            variants: {
+                qos0: {
+                    name: 'QoS 0 · 最多一次',
+                    steps: [
+                        createStep(
+                            2,
+                            1,
+                            '订阅主题',
+                            'SUBSCRIBE\nPacket Identifier: 7\nTopic Filter: im/bob\nMaximum QoS: 0',
+                            'Bob 订阅自己的消息主题。SUBSCRIBE 本身需要 SUBACK，即使消息 QoS 为 0。',
+                            ['待发布', '记录订阅', '等待 SUBACK'],
+                        ),
+                        createStep(
+                            1,
+                            2,
+                            '订阅确认',
+                            'SUBACK\nPacket Identifier: 7\nReason Code: Granted QoS 0',
+                            'Broker 确认该订阅允许的最大 QoS。',
+                            ['待发布', '订阅完成', '已订阅'],
+                        ),
+                        createStep(
+                            0,
+                            1,
+                            '发布消息',
+                            'PUBLISH\nTopic Name: im/bob\nQoS: 0\nPayload: hello',
+                            'QoS 0 的 PUBLISH 没有 Packet Identifier，不要求 PUBACK。',
+                            ['已发布，无确认', '收到发布', '已订阅'],
+                        ),
+                        createStep(
+                            1,
+                            2,
+                            '向订阅者投递',
+                            'PUBLISH\nTopic Name: im/bob\nQoS: 0\nPayload: hello',
+                            '最多一次交付：连接中断可能丢失消息，协议不保证重发。',
+                            ['无业务已读', '完成路由', '收到消息'],
+                        ),
+                    ],
+                },
+                qos1: {
+                    name: 'QoS 1 · 丢 ACK 与重传',
+                    steps: [
+                        createStep(
+                            2,
+                            1,
+                            'Bob 订阅 im/bob',
+                            'SUBSCRIBE\nPacket Identifier: 7\nTopic Filter: im/bob\nMaximum QoS: 1',
+                            '场景从连接已建立开始。',
+                            ['待发布', '处理订阅', '等待 SUBACK'],
+                        ),
+                        createStep(
+                            1,
+                            2,
+                            '订阅成功',
+                            'SUBACK\nPacket Identifier: 7\nReason Code: Granted QoS 1',
+                            '接下来分别观察发布者→Broker 与 Broker→订阅者两段交付。',
+                            ['待发布', '订阅完成', '已订阅'],
+                        ),
+                        createStep(
+                            0,
+                            1,
+                            'QoS 1 发布',
+                            'PUBLISH QoS=1 DUP=0\nPacket Identifier: 42\nTopic Name: im/bob\nPayload: {"clientMsgId":"m-1","text":"hello"}',
+                            'Packet Identifier 只标识这一段连接上的协议交换。业务去重可以另用 clientMsgId。',
+                            ['等待 PUBACK', '接受发布', '已订阅'],
+                        ),
+                        createStep(
+                            1,
+                            0,
+                            '故障注入：PUBACK 未到达',
+                            'PUBACK\nPacket Identifier: 42\n[教学场景：连接断开前未被发布者收到]',
+                            'Broker 已接受消息，但发布者不知道；协议确认不代表用户已读。',
+                            ['连接中断 / 未确认', '已接受', '已订阅'],
+                        ),
+                        createStep(
+                            1,
+                            2,
+                            'Broker 转发给 Bob',
+                            'PUBLISH QoS=1 DUP=0\nPacket Identifier: 91\nTopic Name: im/bob\nPayload: {"clientMsgId":"m-1","text":"hello"}',
+                            '下游交付使用独立 Packet Identifier，不能照搬发布者的 42。',
+                            ['未确认', '等待 Bob 确认', '收到第 1 次'],
+                        ),
+                        createStep(
+                            2,
+                            1,
+                            'Bob 确认',
+                            'PUBACK\nPacket Identifier: 91',
+                            '订阅客户端确认收到，不是用户阅读回执。',
+                            ['未确认', '下游已确认', '已接收'],
+                        ),
+                        createStep(
+                            0,
+                            1,
+                            '恢复已有会话后重发',
+                            'CONNECT Clean Start=0（示意，已保留会话）\nCONNACK Session Present=1\nPUBLISH QoS=1 DUP=1 Packet Identifier=42\nPayload: {"clientMsgId":"m-1","text":"hello"}',
+                            '假设原会话未过期，重新连接后重发未确认的发布；MQTT 5 不采用此页面的应用 ACK 超时重试逻辑。',
+                            ['重发未确认发布', '可能重复接收', '可能收到重复'],
+                        ),
+                        createStep(
+                            1,
+                            0,
+                            '成功收到 PUBACK',
+                            'PUBACK\nPacket Identifier: 42',
+                            'QoS 1 至少一次可能带来重复；应用仍应按业务消息 ID 去重。',
+                            ['协议交付已确认', '交换完成', '需业务去重'],
+                        ),
+                    ],
+                },
+                qos2: {
+                    name: 'QoS 2 · 四步交付',
+                    steps: [
+                        createStep(
+                            0,
+                            1,
+                            'PUBLISH',
+                            'PUBLISH QoS=2 DUP=0\nPacket Identifier: 52\nTopic Name: im/bob\nPayload: hello',
+                            '这里只演示发布者到 Broker 的 QoS 2 交换，省略订阅和下游投递。',
+                            ['等待 PUBREC', '接收并记录状态', '不展示下游'],
+                        ),
+                        createStep(
+                            1,
+                            0,
+                            'PUBREC',
+                            'PUBREC\nPacket Identifier: 52',
+                            '接收方确认收到；发布者转入等待完成阶段。',
+                            ['准备释放', '等待 PUBREL', '不展示下游'],
+                        ),
+                        createStep(
+                            0,
+                            1,
+                            'PUBREL',
+                            'PUBREL\nPacket Identifier: 52',
+                            '进入释放阶段；接收方维护状态，避免重复交付。',
+                            ['等待 PUBCOMP', '完成本段处理', '不展示下游'],
+                        ),
+                        createStep(
+                            1,
+                            0,
+                            'PUBCOMP',
+                            'PUBCOMP\nPacket Identifier: 52',
+                            '本段协议交换完成。恰好一次的 QoS 语义不等于端到端业务处理或已读恰好一次。',
+                            ['本段交换完成', '本段交换完成', '仍需业务回执'],
+                        ),
+                    ],
+                },
+            },
+        },
+        // STOMP：文本命令运行在已建立的传输连接之上；ACK 不等于用户已读。
+        stomp: {
+            name: 'STOMP',
+            layer: '消息标准',
+            title: '在 WebSocket 之上，使用标准消息命令。',
+            description:
+                'STOMP 1.2 文本帧教学模拟。\0 表示 NUL 帧终止符；示例假设服务端提供目的地址路由，当前 Java 服务不接受 STOMP 帧。',
+            actors: ['Alice', '消息服务端', 'Bob'],
+            source: ['STOMP 1.2 规范', 'https://stomp.github.io/stomp-specification-1.2.html'],
+            variants: {
+                normal: {
+                    name: '连接、订阅、发送与确认',
+                    steps: [
+                        createStep(
+                            2,
+                            1,
+                            '建立 STOMP 会话',
+                            'CONNECT\naccept-version:1.2\nhost:im.example.com\nheart-beat:10000,10000\n\n\0',
+                            'STOMP CONNECT 是应用层帧；底层 WebSocket 连接已建立。',
+                            ['底层已连接', '等待 CONNECT', '等待 CONNECTED'],
+                        ),
+                        createStep(
+                            1,
+                            2,
+                            '协商成功',
+                            'CONNECTED\nversion:1.2\nheart-beat:10000,10000\n\n\0',
+                            '示例双方协商约 10 秒的心跳周期；允许实现误差。',
+                            ['已有 STOMP 会话', 'STOMP 已连接', 'STOMP 已连接'],
+                        ),
+                        createStep(
+                            2,
+                            1,
+                            '订阅并启用逐条确认',
+                            'SUBSCRIBE\nid:sub-bob\ndestination:/queue/bob\nack:client-individual\n\n\0',
+                            'client-individual 让每条 MESSAGE 单独确认。destination 的业务含义由服务端决定。',
+                            ['待发送', '记录订阅', '已订阅'],
+                            [
+                                ['id', '订阅 ID'],
+                                ['ack', '确认模式，不是业务已读'],
+                            ],
+                        ),
+                        createStep(
+                            0,
+                            1,
+                            'SEND 携带回执请求',
+                            'SEND\ndestination:/queue/bob\nreceipt:send-1\ncontent-type:text/plain\n\nhello\0',
+                            'receipt 请求服务端报告此帧处理完成；不表示 Bob 已读。',
+                            ['等待 RECEIPT', '接收 SEND', '等待消息'],
+                        ),
+                        createStep(
+                            1,
+                            0,
+                            'RECEIPT',
+                            'RECEIPT\nreceipt-id:send-1\n\n\0',
+                            'receipt-id 对应 SEND 的 receipt。',
+                            ['SEND 已处理', '处理完成', '等待消息'],
+                        ),
+                        createStep(
+                            1,
+                            2,
+                            'MESSAGE 投递',
+                            'MESSAGE\nsubscription:sub-bob\nmessage-id:msg-1\ndestination:/queue/bob\nack:ack-token-1\n\nhello\0',
+                            'MESSAGE 的 ack 头给出客户端 ACK 应引用的标识。',
+                            ['无业务已读', '等待消费确认', '收到消息'],
+                        ),
+                        createStep(
+                            2,
+                            1,
+                            'ACK 消费确认',
+                            'ACK\nid:ack-token-1\n\n\0',
+                            'STOMP 1.2 的 ACK id 引用 MESSAGE 的 ack 头，不能混淆为 message-id。',
+                            ['无业务已读', '消费确认完成', '已确认消费'],
+                        ),
+                    ],
+                },
+            },
+        },
+        // WebRTC：用直连与中继场景解释信令、候选地址和媒体流。
+        webrtc: {
+            name: '音视频 / WebRTC',
+            layer: '实时媒体',
+            title: '先交换连接信息，再传输媒体。',
+            description:
+                '音视频建立过程的教学模拟；不调用摄像头、不建立真实媒体通话。SDP 与 ICE 报文为结构摘录，不可直接用于真实会话。',
+            actors: ['Alice', '信令 / STUN / TURN', 'Bob'],
+            source: ['WebRTC 官方连接指南', 'https://webrtc.org/getting-started/peer-connections'],
+            variants: {
+                direct: {
+                    name: '直连成功',
+                    steps: [
+                        createStep(
+                            0,
+                            1,
+                            '发起呼叫：应用信令',
+                            '{"type":"CALL_INVITE","to":"bob","callId":"c-1"}',
+                            '呼叫邀请属于应用协议，可以通过已有 WebSocket 通道发送。',
+                            ['呼叫中', '转发邀请', '待接听'],
+                        ),
+                        createStep(
+                            0,
+                            2,
+                            '经信令服务交换 SDP Offer',
+                            'SDP 摘录（省略必要字段）：\nv=0\nm=audio 9 UDP/TLS/RTP/SAVPF 111\na=rtpmap:111 opus/48000/2\na=ice-ufrag:alice\na=fingerprint:sha-256 <证书指纹>',
+                            'SDP 描述媒体能力与连接参数；这条箭头代表经信令服务传递，不代表已建立直连。',
+                            ['等待 Answer', '转发 Offer', '处理 Offer'],
+                        ),
+                        createStep(
+                            2,
+                            0,
+                            '经信令服务交换 SDP Answer',
+                            'SDP 摘录：\nm=audio 9 UDP/TLS/RTP/SAVPF 111\na=rtpmap:111 opus/48000/2\na=ice-ufrag:bob',
+                            '接收方选择兼容参数，返回 Answer。WebRTC 不规定应用的信令传输协议。',
+                            ['设置远端描述', '转发 Answer', '媒体协商完成'],
+                        ),
+                        createStep(
+                            0,
+                            1,
+                            'STUN：发现映射地址',
+                            'STUN Binding Request → Binding Success Response\nXOR-MAPPED-ADDRESS: 203.0.113.10:52000（示例）',
+                            '获取服务端观察到的映射地址，形成 server-reflexive candidate；不保证一定能穿透 NAT。',
+                            ['收集候选地址', '返回映射地址', '收集候选地址'],
+                        ),
+                        createStep(
+                            0,
+                            2,
+                            '交换 ICE 候选并检查',
+                            'ICE candidate 摘录：\na=candidate:1 1 UDP 2122260223 192.0.2.10 50000 typ host\nSTUN connectivity checks → selected pair',
+                            '双方通过信令交换候选地址，再通过连接检查选择可用路径。',
+                            ['选定候选对', '信令完成', '选定候选对'],
+                        ),
+                        createStep(
+                            0,
+                            2,
+                            'DTLS 握手',
+                            'DTLS handshake\n验证对端证书与 SDP fingerprint\n协商 SRTP 密钥',
+                            '媒体通道使用 DTLS-SRTP 建立密钥，不是复用 WSS 的 TLS 密钥。',
+                            ['媒体密钥就绪', '无媒体中继', '媒体密钥就绪'],
+                        ),
+                        createStep(
+                            0,
+                            2,
+                            'SRTP / SRTCP 媒体流',
+                            'SRTP: 加密音频/视频数据\nSRTCP: 加密的媒体控制与反馈',
+                            '直连媒体路径不需要经应用聊天服务转发；实际系统也可使用 SFU 等服务器架构。',
+                            ['正在通话', '只处理信令', '正在通话'],
+                        ),
+                    ],
+                },
+                relay: {
+                    name: '直连失败 → TURN 中继',
+                    steps: [
+                        createStep(
+                            0,
+                            2,
+                            '协商会话并检查直连',
+                            'SDP Offer / Answer（经信令服务）\nICE host / srflx connectivity checks: failed',
+                            '此场景假设直接路径不可用。TURN 候选通常可提前收集，不必等所有直连失败才申请。',
+                            ['直接路径不可用', '提供 TURN 服务', '直接路径不可用'],
+                        ),
+                        createStep(
+                            0,
+                            1,
+                            '申请中继地址',
+                            'TURN Allocate Request（含认证）\nAllocate Success Response\nXOR-RELAYED-ADDRESS: 192.0.2.20:55000',
+                            'TURN 分配 relay candidate，媒体流量会经过中继服务器。',
+                            ['获得 relay candidate', '分配中继地址', '收集候选'],
+                        ),
+                        createStep(
+                            0,
+                            2,
+                            '选择中继候选对',
+                            '经信令交换 relay candidate\n配置 TURN 权限 / 通道（简化）\nICE checks → relay pair selected',
+                            '对中继候选进行检查；建立好路径后仍执行 DTLS 握手。',
+                            ['中继路径就绪', '中继权限就绪', '中继路径就绪'],
+                        ),
+                        createStep(
+                            0,
+                            1,
+                            '向 TURN 发送加密媒体',
+                            'DTLS-SRTP 密钥建立完成（简化）\nAlice → TURN: SRTP packet',
+                            '示例 TURN 只中继数据包，不充当媒体解密端点。',
+                            ['正在通话', '转发加密媒体', '等待媒体'],
+                        ),
+                        createStep(
+                            1,
+                            2,
+                            'TURN 转发给 Bob',
+                            'TURN → Bob: SRTP packet',
+                            '中继提高连通性，同时增加服务器带宽和可能的延迟；反向媒体走对应路径。',
+                            ['正在通话', '中继中', '收到加密媒体'],
+                        ),
+                    ],
+                },
+            },
+        },
+        // 可靠消息：自定义业务策略的状态机，与真实 Java 服务功能分开。
+        reliability: {
+            name: '可靠消息',
+            layer: '业务机制',
+            title: '丢失、重复、离线，业务怎么兜底？',
+            description:
+                '自定义 IM 业务机制的教学模拟；独立于上方真实 WebSocket 服务。这里演示去重、离线存储和同步策略，现有真实聊天服务仍不持久化、不自动重试。',
+            actors: ['Alice', 'IM 服务端', 'Bob'],
+            source: null,
+            variants: {
+                retry: {
+                    name: 'ACK 丢失 → 重试与去重',
+                    steps: [
+                        createStep(
+                            0,
+                            1,
+                            '第一次发送',
+                            '{"type":"CHAT","clientMsgId":"a-42","to":"bob","text":"hello"}',
+                            '客户端为同一业务消息生成稳定 ID，重试时保持不变。',
+                            ['等待 ACK', '检查去重键', '在线'],
+                        ),
+                        createStep(
+                            1,
+                            1,
+                            '保存并登记去重键',
+                            '事务（示意）：\nUNIQUE(senderId, clientMsgId)\n保存 messageId=m-101, conversationSeq=101\n登记待投递事件',
+                            '持久化和去重需原子处理；示例是状态机模拟，不执行数据库 SQL。',
+                            ['等待 ACK', '存储 1 条消息', '在线'],
+                        ),
+                        createStep(
+                            1,
+                            0,
+                            '故障：应用 ACK 丢失',
+                            '{"type":"ACK","refClientMsgId":"a-42","messageId":"m-101"}\n[故障注入：此响应未到达客户端]',
+                            '服务端已保存，客户端仍无法判断成功；TCP 可靠不能消除所有断线和应用故障。',
+                            ['ACK 超时', '存储 1 条消息', '在线'],
+                        ),
+                        createStep(
+                            0,
+                            1,
+                            '超时重试同一消息',
+                            '{"type":"CHAT","clientMsgId":"a-42","to":"bob","text":"hello"}',
+                            '这是自定义应用重试策略，与 MQTT 5 会话重传机制不同。',
+                            ['重试第 1 次', '查找去重记录', '在线'],
+                        ),
+                        createStep(
+                            1,
+                            0,
+                            '返回原 ACK，不重复保存',
+                            '{"type":"ACK","refClientMsgId":"a-42","messageId":"m-101","duplicate":true}',
+                            '相同 senderId + clientMsgId 对应原消息。实际实现需检查重试内容一致性。',
+                            ['服务端已接受', '仍只有 1 条消息', '在线'],
+                        ),
+                        createStep(
+                            1,
+                            2,
+                            '投递与接收方去重',
+                            '{"type":"MESSAGE","messageId":"m-101","conversationSeq":101}\nBob: 已存在 messageId 则不重复展示',
+                            '传输可能重复，双方的业务幂等才能避免重复消息；已读仍是另一条业务确认。',
+                            ['已接受 / 未必已读', '投递完成', '展示 1 条消息'],
+                        ),
+                    ],
+                },
+                offline: {
+                    name: '离线存储 → 重连同步',
+                    steps: [
+                        createStep(
+                            2,
+                            1,
+                            'Bob 断线',
+                            '连接关闭\nBob 本地 lastSeq=100',
+                            'lastSeq 是这个会话连续已同步的序号，不是 TCP 字节序号。',
+                            ['在线', 'Bob 离线', '离线 / lastSeq=100'],
+                        ),
+                        createStep(
+                            0,
+                            1,
+                            '离线期间发送',
+                            'CHAT clientMsgId=a-43\nCHAT clientMsgId=a-44',
+                            'Alice 的消息进入服务端持久化流程，而不是直接因 Bob 离线而丢弃。',
+                            ['发送两条消息', '生成 seq=101,102', '离线'],
+                        ),
+                        createStep(
+                            1,
+                            0,
+                            '服务端确认已保存',
+                            'ACK messageId=m-101 seq=101\nACK messageId=m-102 seq=102',
+                            'ACK 表示保存成功；无法表示离线用户已收到或已读。',
+                            ['保存已确认', '离线待同步 2 条', '离线'],
+                        ),
+                        createStep(
+                            2,
+                            1,
+                            '重连、认证并同步',
+                            '{"type":"SYNC","conversationId":"alice-bob","afterSeq":100,"limit":50}',
+                            '从上次连续序号之后恢复；真实系统还需校验会话权限。',
+                            ['在线', '查询 seq > 100', '重连 / 请求同步'],
+                        ),
+                        createStep(
+                            1,
+                            2,
+                            '补发缺失消息',
+                            '{"type":"SYNC_RESULT","messages":[{"seq":101,"id":"m-101"},{"seq":102,"id":"m-102"}],"hasMore":false}',
+                            '按会话序号排序，客户端按 messageId 去重后，推进连续同步游标。',
+                            ['在线', '返回缺失消息', 'lastSeq=102'],
+                        ),
+                        createStep(
+                            2,
+                            1,
+                            '同步完成',
+                            '{"type":"SYNC_ACK","conversationId":"alice-bob","lastSeq":102}',
+                            '同步游标说明数据已补齐，不自动代表用户已阅读。',
+                            ['未必已读', '同步至 102', '已同步 2 条'],
+                        ),
+                    ],
+                },
+                gap: {
+                    name: '乱序 / 序号缺口',
+                    steps: [
+                        createStep(
+                            1,
+                            2,
+                            '先收到 seq=103',
+                            'MESSAGE conversationSeq=103\n本地连续 lastSeq=100',
+                            '103 到达不意味着 101、102 都已收到；不能直接把连续游标推进到 103。',
+                            ['在线', '持有 101–103', '缓存 103 / lastSeq=100'],
+                        ),
+                        createStep(
+                            2,
+                            1,
+                            '检测缺口，拉取补齐',
+                            'SYNC afterSeq=100',
+                            '请求缺失区间；使用稳定的会话序号和幂等合并。',
+                            ['在线', '准备同步', '发现缺口 101–102'],
+                        ),
+                        createStep(
+                            1,
+                            2,
+                            '返回 101、102、103',
+                            'SYNC_RESULT messages=[101,102,103]',
+                            '103 已缓存，因此去重；只在 101、102 补齐后推进连续游标。',
+                            ['在线', '同步返回', '合并 101–103'],
+                        ),
+                        createStep(
+                            2,
+                            2,
+                            '按序展示并推进游标',
+                            'display=[101,102,103]\nlastSeq=103\nduplicatesDropped=1',
+                            '应用恢复顺序和完整性；TCP 的连接内有序不能覆盖跨连接恢复和多通道业务顺序。',
+                            ['在线', '同步完成', '连续游标=103'],
+                        ),
+                    ],
+                },
+            },
+        },
+    };
+    // 心跳与重连也是可靠消息的一部分；这个场景不实际等待退避时长。
+    scenes.reliability.variants.heartbeat = {
+        name: '心跳超时 → 退避重连',
+        steps: [
+            createStep(
+                0,
+                1,
+                '发送应用心跳',
+                '{"type":"PING","id":"p-9"}\n设置响应截止时间（示例：5 秒）',
+                '心跳周期与超时由应用定义；浏览器不能直接用 API 发送 WebSocket Ping 控制帧。',
+                ['等待 PONG', '连接正常', '在线'],
+            ),
+            createStep(
+                1,
+                0,
+                '故障注入：PONG 未到达',
+                'PONG refId=p-9\n[模拟网络中断，客户端未收到]',
+                '单次超时可能是网络延迟。实际策略可设置容忍次数，避免过于敏感。',
+                ['响应超时', '响应未到达', '在线'],
+            ),
+            createStep(
+                0,
+                0,
+                '关闭旧连接并调度重连',
+                '关闭旧 WebSocket\n第 1 次重连等待：1 秒 + 随机抖动',
+                '示例判断旧连接不可用。等待是客户端本地计时，不是网络消息。',
+                ['准备重连', '旧会话待清理', '在线'],
+            ),
+            createStep(
+                0,
+                1,
+                '失败后指数退避',
+                'attempt 1: failed → wait ~2s\nattempt 2: failed → wait ~4s\n最大等待：30s（示例）',
+                '限制频率并加入随机抖动，避免大量客户端同时请求。此动画没有真实等待这些秒数。',
+                ['退避重试', '暂不可达', '在线'],
+            ),
+            createStep(
+                0,
+                1,
+                '重新连接并认证',
+                '新 WebSocket OPEN\nLOGIN token=<有效凭据>\nLOGIN_OK',
+                '新连接通常需要重新建立认证状态；仅重连成功不等于消息已经补齐。',
+                ['新连接已认证', '新会话已建立', '在线'],
+            ),
+            createStep(
+                0,
+                1,
+                '重置退避并恢复业务',
+                'retryAttempt=0\nSYNC afterSeq=<本地连续同步游标>\n重发尚未确认的消息（稳定 clientMsgId）',
+                '同时恢复历史与待确认消息，并去重；已读状态由独立业务逻辑同步。',
+                ['恢复同步中', '处理同步 / 去重', '在线'],
+            ),
+        ],
+    };
+    globalThis.IMLabScenes = scenes; // 暴露场景集合，播放器只读取这些数据，供播放器与测试读取。
+})(); // 限制 createStep 等辅助函数的作用域，避免与其他脚本重名。
